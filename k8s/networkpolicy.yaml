@@ -1,0 +1,33 @@
+# Default deny, then allow: ingress to the app port, egress to DNS and HTTPS (Groq API).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubesentinel-default-deny
+  namespace: kubesentinel
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kubesentinel-allow
+  namespace: kubesentinel
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kubesentinel
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - port: 8501
+          protocol: TCP
+  egress:
+    - ports:               # DNS
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - ports:               # HTTPS to api.groq.com
+        - port: 443
+          protocol: TCP

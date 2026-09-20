@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesentinel
+  namespace: kubesentinel
+  labels:
+    app.kubernetes.io/name: kubesentinel
+  annotations:
+    # Tag is pinned (see policy/kubernetes.rego). Digest pinning is applied by the release process,
+    # because the digest only exists after the image is pushed.
+    checkov.io/skip1: "CKV_K8S_43=Version tag pinned; digest added at release"
+spec:
+  replicas: 1            # Streamlit keeps session state in-process; scale with sticky sessions if needed
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubesentinel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubesentinel
+    spec:
+      serviceAccountName: kubesentinel
+      automountServiceAccountToken: false     # replay mode never talks to the Kubernetes API
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kubesentinel
+          image: ghcr.io/dhayalramesh/kubesentinel-ai-ops:0.1.0
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8501
+          env:
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: groq-secret            # optional: without it the app runs the mock baseline
+              mountPath: /etc/kubesentinel-secrets
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: groq-secret
+          secret:
+            secretName: kubesentinel-groq
+            optional: true
+            defaultMode: 0440

@@ -1,0 +1,12 @@
+title = "kubesentinel gitleaks config"
+
+[extend]
+useDefault = true
+
+# Deliberately fake secrets used by fixtures and tests to prove that redaction works.
+[allowlist]
+description = "fake test secrets"
+regexes = [
+  '''tok_live_51Habc123''',
+  '''gsk_abcdefghijklmnop1234''',
+]

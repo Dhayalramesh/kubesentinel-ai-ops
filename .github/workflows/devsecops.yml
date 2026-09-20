@@ -1,0 +1,138 @@
+name: DevSecOps
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"   # weekly: new CVEs and rules appear without code changes
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devsecops-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sast-semgrep:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Run Semgrep (fails on findings)
+        run: |
+          pip install semgrep==1.177.0
+          semgrep scan --config p/python --config p/security-audit --config p/dockerfile \
+            --metrics=off --error --exclude tests .
+
+  secrets-gitleaks:
+    name: Secrets scan (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Gitleaks (checksum-verified binary, no third-party action)
+        run: |
+          VERSION=8.30.1
+          SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          curl -sSfL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
+          echo "${SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz gitleaks
+      - name: Scan full git history
+        run: ./gitleaks detect --source . --redact --verbose --exit-code 1
+
+  sca-trivy:
+    name: SCA + IaC + secrets (Trivy filesystem)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Pinned to the commit for v0.35.0 with an explicit Trivy binary version. Never use a mutable tag
+      # for this action: see docs/DEVSECOPS.md (March 2026 Trivy supply-chain incident).
+      - uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          version: v0.69.3
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+        env:
+          TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2,ghcr.io/aquasecurity/trivy-db:2
+
+  iac-checkov:
+    name: IaC scan (Checkov)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Run Checkov on Kubernetes manifests, Dockerfile and workflows
+        run: |
+          pip install checkov==3.3.19
+          checkov -d . --framework kubernetes dockerfile github_actions --quiet --compact \
+            --skip-path tests --skip-path notebooks
+
+  policy-conftest:
+    name: Policy-as-code (OPA / Conftest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Conftest (checksum-verified binary)
+        run: |
+          VERSION=0.70.1
+          SHA256=613d124b8f6c1f3cee890491f7ab19114cca5a2102ca47cb2e6c35b4c23f9c8a
+          curl -sSfL -o conftest.tgz "https://github.com/open-policy-agent/conftest/releases/download/v${VERSION}/conftest_${VERSION}_Linux_x86_64.tar.gz"
+          echo "${SHA256}  conftest.tgz" | sha256sum -c -
+          tar -xzf conftest.tgz conftest
+      - name: Unit-test the policies themselves
+        run: ./conftest verify --policy policy/
+      - name: Enforce policies on the Kubernetes manifests
+        run: ./conftest test k8s/ --policy policy/ --ignore "policies|kustomization"
+
+  sbom-and-vulns:
+    name: SBOM (Syft) + vulnerability gate (Grype)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          upload-artifact: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-cyclonedx
+          path: sbom.cdx.json
+      - name: Fail on fixable HIGH/CRITICAL vulnerabilities
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          sbom: sbom.cdx.json
+          fail-build: true
+          severity-cutoff: high
+          only-fixed: true

@@ -1,0 +1,22 @@
+{
+  "date": "2026-09-20",
+  "model": "openai/gpt-oss-120b",
+  "incidents": 20,
+  "runs_per_incident": 3,
+  "valid_runs": 60,
+  "llm_errors": 0,
+  "action_accuracy": "60/60",
+  "rca_accuracy": "58/60",
+  "guardrail_blocks": 2,
+  "residual_risk_v2": 0,
+  "policy_v1": {
+    "wrong_passed": 0,
+    "wrong_blocked": 0,
+    "false_blocks": 0
+  },
+  "policy_v2": {
+    "wrong_passed": 0,
+    "wrong_blocked": 0,
+    "false_blocks": 2
+  }
+}

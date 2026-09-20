@@ -1,0 +1,88 @@
+name: Kubernetes deploy check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k8s-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kind:
+    name: Deploy to a kind cluster under a restricted security context
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build -t kubesentinel-ai-ops:ci .
+
+      - name: Create kind cluster
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          cluster_name: kubesentinel
+
+      - name: Load image into the cluster and point the manifest at it
+        run: |
+          kind load docker-image kubesentinel-ai-ops:ci --name kubesentinel
+          sed -i 's#ghcr.io/dhayalramesh/kubesentinel-ai-ops:0.1.0#kubesentinel-ai-ops:ci#; s#imagePullPolicy: Always#imagePullPolicy: IfNotPresent#' k8s/deployment.yaml
+
+      - name: Apply manifests (namespace enforces the Pod Security "restricted" profile)
+        run: kubectl apply -k k8s/
+
+      - name: Wait for rollout
+        run: kubectl -n kubesentinel rollout status deployment/kubesentinel --timeout=240s
+
+      - name: Health check through the Service
+        run: |
+          kubectl -n kubesentinel port-forward svc/kubesentinel 8501:80 &
+          sleep 5
+          curl -fsS http://127.0.0.1:8501/_stcore/health
+          echo
+
+      - name: Verify the security context is really applied
+        run: |
+          POD=$(kubectl -n kubesentinel get pod -l app.kubernetes.io/name=kubesentinel -o jsonpath='{.items[0].metadata.name}')
+          test "$(kubectl -n kubesentinel exec "$POD" -- id -u)" = "10001"
+          if kubectl -n kubesentinel exec "$POD" -- sh -c 'touch /app/should-fail' 2>/dev/null; then
+            echo "root filesystem is writable"; exit 1
+          fi
+          echo "non-root and read-only root filesystem confirmed"
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n kubesentinel get all
+          kubectl -n kubesentinel describe pods
+          kubectl -n kubesentinel logs deployment/kubesentinel --tail=100 || true
+
+  dast:
+    name: DAST baseline (OWASP ZAP, informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true    # Streamlit renders over websockets, so a baseline scan sees little
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start the app in mock mode
+        run: |
+          docker build -t kubesentinel-ai-ops:dast .
+          docker run -d --name app -p 8501:8501 -e KUBESENTINEL_FORCE_MOCK=1 kubesentinel-ai-ops:dast
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8501/_stcore/health && break || sleep 2; done
+      - name: ZAP baseline scan
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
+        with:
+          target: http://127.0.0.1:8501
+          allow_issue_writing: false
+          fail_action: false
